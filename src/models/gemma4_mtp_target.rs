@@ -391,7 +391,7 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
         self
     }
 
-    /// Match the scheduler's classic prefill geometry on the corrected 31B
+    /// Match the scheduler's classic prefill geometry on corrected 31B/12B
     /// target. Other Gemma variants retain their existing prefill path.
     #[must_use]
     pub fn with_prefill_chunk_size(mut self, chunk_size: usize) -> Self {
@@ -2176,7 +2176,7 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
         prompt_tokens_per_row: &[Vec<i32>],
         sampler: &SamplingConfig,
     ) -> Result<(Vec<i32>, MtpBatchedVerifyOutput), DrafterError> {
-        // The row-wise geometries (31B everywhere, 12B on CUDA) verify each
+        // The row-wise geometries (31B and 12B) verify each
         // row exactly as the B = 1 linear adapter does, which needs each row's
         // prompt KV built the way classic serving builds it (issue #2190).
         if self.wrapper.mtp_row_verify_enabled() {

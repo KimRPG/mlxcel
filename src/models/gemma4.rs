@@ -270,17 +270,29 @@ pub struct TextConfig {
 impl TextConfig {
     /// Whether MTP verify must reproduce classic decode one query row at a
     /// time, which restricts it to B=1 linear blocks on rotating-buffered
-    /// caches. True for the 31B geometry everywhere, and for the 12B geometry
-    /// on CUDA, where an M=4 verify block leaves the single-query
-    /// `sdpa_vector` kernel classic decode uses at head_dim 256 (issue #2160).
+    /// caches. The 31B policy is unchanged on every backend; 12B is enabled
+    /// by the existing CUDA policy or the measured active Metal path. Buffered
+    /// chronological keys and batched full attention do not reproduce
+    /// classic decode's physical-ring reduction and maskless M=1 dispatch.
+    /// The 12B Metal localization and staged correction are recorded in
+    /// `docs/benchmark_results/gemma4-12b-mtp-exactness-m1-ultra-2026-10-15.md`.
     pub(crate) fn mtp_requires_linear_singleton(&self) -> bool {
-        self.mtp_requires_linear_singleton_on(mlxcel_core::cuda_is_available())
+        self.mtp_requires_linear_singleton_on(
+            mlxcel_core::cuda_is_available(),
+            mlxcel_core::metal_is_available(),
+            mlxcel_core::default_device_is_gpu(),
+        )
     }
 
-    /// [`Self::mtp_requires_linear_singleton`] with the backend made explicit,
-    /// so both answers are testable on one host. The 12B arm stays off on
-    /// Metal, whose 12B verify behavior is #1986's subject.
-    pub(crate) fn mtp_requires_linear_singleton_on(&self, cuda: bool) -> bool {
+    /// Keep the established CUDA policy and add only the measured active
+    /// Metal path. Metal availability alone would also widen CPU-selected
+    /// execution on a Mac; other GPU backends (including ROCm) stay unchanged.
+    pub(crate) fn mtp_requires_linear_singleton_on(
+        &self,
+        cuda_available: bool,
+        metal_available: bool,
+        default_is_gpu: bool,
+    ) -> bool {
         let geometry = |heads, kv_heads, global_kv_heads| {
             self.num_attention_heads == heads
                 && self.num_key_value_heads == kv_heads
@@ -288,12 +300,13 @@ impl TextConfig {
                 && self.head_dim == 256
                 && self.global_head_dim == Some(512)
         };
-        geometry(32, 16, 4) || (cuda && geometry(16, 8, 1))
+        geometry(32, 16, 4)
+            || ((cuda_available || (metal_available && default_is_gpu)) && geometry(16, 8, 1))
     }
 
     pub(crate) fn mtp_probe_prompt_lengths(&self) -> Vec<usize> {
         // Preserve the original three short draws for other Gemma variants.
-        // The long buffered draw validates the measured 31B correction.
+        // The long buffered draw validates the measured 31B and 12B corrections.
         let mut lengths = vec![8; 3];
         if self.mtp_requires_linear_singleton() {
             lengths.push(self.sliding_window.saturating_add(32).min(1536));
@@ -2107,7 +2120,7 @@ impl Attention {
     ) -> UniquePtr<MlxArray> {
         let query_len = mlxcel_core::array_shape(queries)[2];
         let local_mask = trim_mask_to_keys(mask, keys, query_len);
-        // Row-wise MTP verify (31B everywhere, 12B on CUDA; see
+        // Row-wise MTP verify (31B and 12B; see
         // `TextConfig::mtp_requires_linear_singleton`). A batched M=K block
         // and classic M=1 decode select different kernels or reductions:
         // unfused full attention at head_dim 512 picks different matmul
@@ -5277,7 +5290,7 @@ impl Gemma4Wrapper {
             .replace_internal(self.make_configured_caches());
     }
 
-    /// Row-wise exact verify (31B everywhere, 12B on CUDA) is validated only
+    /// Row-wise exact verify (31B and 12B) is validated only
     /// for B=1 linear verify.
     /// Used by: MTP scheduler dispatch and direct tree-target capability checks.
     pub fn mtp_requires_linear_singleton(&self) -> bool {
@@ -5799,7 +5812,7 @@ impl Gemma4Wrapper {
 
     /// Prefill one scheduler-sized chunk and project only its last row, exactly
     /// like classic serving, while retaining the final chunk's assistant seed.
-    /// Used by: Gemma4MtpTargetAdapter for the corrected 31B geometry.
+    /// Used by: Gemma4MtpTargetAdapter for the corrected 31B and 12B geometries.
     pub(crate) fn prefill_mtp_chunk(
         &self,
         input_ids: &MlxArray,
@@ -5829,7 +5842,7 @@ impl Gemma4Wrapper {
             .prefill_last_logits_with_sinks(input_ids, caches, sinks)
     }
 
-    /// Turn on the row-wise MTP verify flags a production 31B (or CUDA 12B)
+    /// Turn on the row-wise MTP verify flags a production 31B (or Metal/CUDA 12B)
     /// geometry sets at load, so a tiny fixture exercises that path.
     #[cfg(test)]
     pub(crate) fn force_mtp_row_verify_for_test(&mut self) {
