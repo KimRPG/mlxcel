@@ -1,36 +1,36 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 855324,
+    "embedded_asset_bytes": 857373,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 181473,
+    "initial_js_gzip_bytes": 181895,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 182086,
+    "total_js_gzip_bytes": 182508,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
       "gzip_bytes": 613,
-      "path": "assets/code-highlight-Dfvzh9FE.js",
-      "sha256": "b847dff5824cf8e3557a8e5505910991cbd58b0683ae04deff021b888a99ccba"
+      "path": "assets/code-highlight-ElpBPyJU.js",
+      "sha256": "09070ea9250ec88169b4dc568d33f75df59d16e5df0be1a5385aea523e5b1b5c"
     },
     {
-      "bytes": 137465,
-      "gzip_bytes": 21825,
-      "path": "assets/index-B5U0RsHg.css",
-      "sha256": "23836a64534b2144f66f05ce625ed90a96fc57f0e56375556887e327c4c79510"
+      "bytes": 138018,
+      "gzip_bytes": 21913,
+      "path": "assets/index-0JVegFfJ.css",
+      "sha256": "3e21904cb5fc5fe38d2c5a554d5c864aab43063e69acb7b89e4b0a324c1ead81"
     },
     {
-      "bytes": 698956,
-      "gzip_bytes": 180484,
-      "path": "assets/index-DHDb0T8Z.js",
-      "sha256": "555f07899b2ca6041a72b302107c419f3c7ec5fc6b992ca6fab86b1848b58f92"
+      "bytes": 700452,
+      "gzip_bytes": 180906,
+      "path": "assets/index-CO2DWqwC.js",
+      "sha256": "1e616eea2603841d5193f98fff026367eee629e4bc5aaf7624460e63bdd7a20b"
     },
     {
       "bytes": 503,
-      "gzip_bytes": 304,
+      "gzip_bytes": 302,
       "path": "index.html",
-      "sha256": "beed570f02d5548f90b049bed5d365ab68f2c0ce8935d45688f473dc189a39bf"
+      "sha256": "bf5ee98ed7cfaa0360d1c271a977516274d75862ca6c2005634ac530ccea1da6"
     },
     {
       "bytes": 2129,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "1ebf0921089e00db6bf288cdd66fb2ba6265f9ee43a4224a07d483f1201d79c8"
+  "source_digest_sha256": "66dba836c219488f6a25ec28a9ccc60164cdac2e462f68a29c9a3522618f0dfc"
 }
