@@ -695,6 +695,33 @@ impl XlaBucketSet {
         }
     }
 
+    /// Queue an owned prepared-embeddings + DeepStack request into the smallest
+    /// bucket that admits its expanded length plus its whole generation budget.
+    ///
+    /// # Errors
+    ///
+    /// Reports the same admission errors a single engine does, including a
+    /// request too large for the largest bucket.
+    pub fn submit_deepstack_prepared(
+        &mut self,
+        request: DeepStackPreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, XlaAdmissionError> {
+        let sequence_len = request.prepared().sequence_len;
+        match self.route(sequence_len, max_new_tokens) {
+            Some(index) => {
+                self.buckets[index].submit_deepstack_prepared(request, max_new_tokens, params)
+            }
+            None => Err(crate::ContextCapacityError {
+                effective_prompt_len: sequence_len,
+                max_new_tokens,
+                context_capacity: self.largest_capacity(),
+            }
+            .into()),
+        }
+    }
+
     /// Cancel `req_id` in whichever bucket owns it.
     pub fn cancel(&mut self, req_id: u64) -> bool {
         let stride = self.buckets.len() as u64;
@@ -1243,6 +1270,49 @@ impl Qwen25VlLanguageDiagnosticEngine {
             return Err("Qwen2.5-VL diagnostics require prepared M-RoPE positions".to_string());
         }
         self.engine.prefill_prepared_slot_logits(0, &prepared_iree)
+    }
+}
+
+/// Diagnostics-only runner for the actual-checkpoint Qwen3-VL DeepStack
+/// language oracle.
+#[cfg(feature = "diagnostics")]
+pub struct Qwen3VlDeepStackDiagnosticEngine {
+    engine: IreeRaggedLlama,
+}
+
+#[cfg(feature = "diagnostics")]
+impl Qwen3VlDeepStackDiagnosticEngine {
+    pub fn load(model_path: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
+        Ok(Self {
+            engine: IreeRaggedLlama::load_with_deepstack_diagnostics(
+                model_path,
+                device,
+                4,
+                context_capacity,
+            )?,
+        })
+    }
+
+    #[must_use]
+    pub fn context_capacity(&self) -> usize {
+        self.engine.context_capacity()
+    }
+
+    pub fn capture(
+        &mut self,
+        prepared: &DeepStackPreparedPrefill,
+    ) -> Result<crate::iree::DeepStackPrefillDiagnostics, String> {
+        self.engine.reset_slots_for_diagnostics()?;
+        let prepared_iree = PreparedIreePrefill::prepare_for_mode(
+            prepared.prepared(),
+            self.engine.hidden_size(),
+            self.engine.context_capacity(),
+            self.engine.position_mode(),
+        )
+        .map_err(|error| error.to_string())?;
+        let deepstack = self.engine.prepare_deepstack(prepared.deepstack())?;
+        self.engine
+            .prefill_deepstack_prepared_slot_diagnostics(0, &prepared_iree, &deepstack)
     }
 }
 

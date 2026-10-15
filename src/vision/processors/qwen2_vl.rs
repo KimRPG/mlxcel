@@ -38,6 +38,7 @@ pub struct Qwen2VLProcessor {
     pub video_default_fps: f64,
     pub video_min_frames: usize,
     pub video_max_frames: usize,
+    resize_filter: FilterType,
 }
 
 /// Default lower pixel bound the Qwen2-VL processors are constructed with.
@@ -178,6 +179,7 @@ impl Qwen2VLProcessor {
             video_default_fps: DEFAULT_VIDEO_FPS,
             video_min_frames: DEFAULT_VIDEO_MIN_FRAMES,
             video_max_frames: DEFAULT_VIDEO_MAX_FRAMES,
+            resize_filter: FilterType::Lanczos3,
         }
     }
 
@@ -201,6 +203,7 @@ impl Qwen2VLProcessor {
             video_default_fps: DEFAULT_VIDEO_FPS,
             video_min_frames: DEFAULT_VIDEO_MIN_FRAMES,
             video_max_frames: DEFAULT_VIDEO_MAX_FRAMES,
+            resize_filter: FilterType::Lanczos3,
         }
     }
 
@@ -225,6 +228,14 @@ impl Qwen2VLProcessor {
         self.video_default_fps = config.fps;
         self.video_min_frames = config.min_frames;
         self.video_max_frames = config.max_frames;
+        self
+    }
+
+    /// Override the image resampler while preserving the historical Qwen2
+    /// default for callers that do not opt in.
+    #[must_use]
+    pub fn with_resize_filter(mut self, resize_filter: FilterType) -> Self {
+        self.resize_filter = resize_filter;
         self
     }
 
@@ -258,7 +269,6 @@ impl Qwen2VLProcessor {
             self.max_pixels,
         )
     }
-
     /// Compute target size that satisfies constraints
     /// Returns (height, width) padded to multiples of factor
     pub(crate) fn smart_resize(&self, orig_h: u32, orig_w: u32) -> (u32, u32) {
@@ -465,7 +475,7 @@ impl Qwen2VLProcessor {
         target_h: u32,
         target_w: u32,
     ) -> Vec<f32> {
-        let resized = image.resize_exact(target_w, target_h, FilterType::Lanczos3);
+        let resized = image.resize_exact(target_w, target_h, self.resize_filter);
         let rgb = resized.to_rgb8();
         let h = target_h as usize;
         let w = target_w as usize;
@@ -632,6 +642,17 @@ mod tests {
         assert_eq!(
             mlxcel_core::array_shape(&pixel_values),
             vec![64, 3 * 14 * 14]
+        );
+    }
+
+    #[test]
+    fn qwen3_checkpoint_policy_lifts_224_square_to_sixteen_by_sixteen_grid() {
+        let processor = Qwen2VLProcessor::new_with_norm(16, 2, 2, [0.5; 3], [0.5; 3])
+            .with_pixel_bounds(65_536, 16_777_216)
+            .with_resize_filter(FilterType::CatmullRom);
+        assert_eq!(
+            processor.compute_grid_thw(&[DynamicImage::new_rgb8(224, 224)]),
+            vec![(1, 16, 16)]
         );
     }
 }
