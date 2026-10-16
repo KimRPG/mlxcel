@@ -1,6 +1,8 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 // Settings copy for request defaults, live server values, next-load profiles and
 // observed context. Every entry is mirrored in tests/fixtures/webui/strings.json.
+import { startupSettingStrings } from './startup-strings';
+
 const settingsBaseStrings = [
   { key: 'settings.server.privacy.body', en: 'Appearance and explicitly saved load profiles use this browser’s preferences. Request defaults stay in memory; API credentials and system prompts are never stored by Settings. Conversation history is controlled separately in Chat.', ko: '모양과 명시적으로 저장한 로드 프로필은 브라우저 환경설정을 사용합니다. 요청 기본값은 메모리에만 유지하며 API 자격 증명과 시스템 프롬프트는 설정에서 저장하지 않습니다. 대화 기록은 대화 화면에서 별도로 관리합니다.', test_id: 'settings-server-privacy-body' },
   { key: 'settings.server.unavailable.title', en: 'Server controls unavailable', ko: '서버 제어 사용 불가', test_id: 'settings-server-unavailable-title' },
@@ -9,10 +11,11 @@ const settingsBaseStrings = [
   { key: 'settings.server.model.none', en: 'No model selected', ko: '선택한 모델 없음', test_id: 'settings-server-model-none' },
   { key: 'settings.server.model.hint', en: 'Selection changes browser context only. It never loads, unloads or reroutes an existing request.', ko: '선택은 브라우저 문맥만 변경하며 모델을 로드하거나 언로드하거나 기존 요청의 대상을 변경하지 않습니다.', test_id: 'settings-server-model-hint' },
   { key: 'settings.server.context.title', en: 'Effective context · observed, not estimated', ko: '실제 컨텍스트 · 추정이 아닌 관측값', test_id: 'settings-server-context-title' },
-  { key: 'settings.server.context.n_ctx', en: 'Per-slot context tokens (/props n_ctx)', ko: '슬롯별 컨텍스트 토큰 (/props n_ctx)', test_id: 'settings-server-context-n-ctx' },
+  { key: 'settings.server.context.n_ctx', en: 'Per-slot context tokens', ko: '슬롯별 컨텍스트 토큰', test_id: 'settings-server-context-n-ctx' },
   { key: 'settings.server.context.n_ctx_hint', en: 'Zero/missing is unknown; do not multiply this value into a shared-pool capacity. Unified KV remains separate work (#1815).', ko: '0 또는 누락은 알 수 없음입니다. 이 값에 슬롯 수를 곱해 공유 풀 용량으로 간주하지 않습니다. 통합 KV는 별도 작업입니다 (#1815).', test_id: 'settings-server-context-n-ctx-hint' },
-  { key: 'settings.server.context.slots', en: 'Configured slots (/props total_slots)', ko: '설정된 슬롯 (/props total_slots)', test_id: 'settings-server-context-slots' },
-  { key: 'settings.server.context.kv_mode', en: 'Active resolved KV cache mode (/props)', ko: '현재 실제 KV 캐시 모드 (/props)', test_id: 'settings-server-context-kv-mode' },
+  { key: 'settings.server.context.slots', en: 'Configured slots', ko: '설정된 슬롯', test_id: 'settings-server-context-slots' },
+  { key: 'settings.server.context.kv_mode', en: 'Active KV cache mode', ko: '현재 KV 캐시 모드', test_id: 'settings-server-context-kv-mode' },
+  { key: 'settings.server.context.source', en: 'Read from /props: n_ctx, total_slots and kv_cache_mode.', ko: '/props의 n_ctx, total_slots, kv_cache_mode 값입니다.', test_id: 'settings-server-context-source' },
   { key: 'settings.server.context.geometry', en: 'Reported context geometry', ko: '보고된 컨텍스트 구성', test_id: 'settings-server-context-geometry' },
   { key: 'settings.server.context.geometry_unknown', en: 'Unknown / props disabled or unavailable', ko: '알 수 없음 / props 비활성화 또는 사용 불가', test_id: 'settings-server-context-geometry-unknown' },
   { key: 'settings.server.unknown', en: 'Unknown', ko: '알 수 없음', test_id: 'settings-server-unknown' },
@@ -126,6 +129,7 @@ const settingsBaseStrings = [
   { key: 'settings.server.props_unavailable.title', en: 'Context unavailable', ko: '컨텍스트를 확인할 수 없음', test_id: 'settings-server-props-unavailable-title' },
   { key: 'settings.server.props_unavailable.body', en: 'The model did not answer /props. Restart with --props to observe its context.', ko: '모델이 /props에 응답하지 않았습니다. 컨텍스트를 확인하려면 --props로 재시작하세요.', test_id: 'settings-server-props-unavailable-body' },
   { key: 'settings.server.startup.failed', en: 'Startup values unavailable', ko: '시작 값을 확인할 수 없음', test_id: 'settings-server-startup-failed' },
+  { key: 'settings.server.startup.other', en: 'Other values (internal names)', ko: '기타 값 (내부 이름)', test_id: 'settings-server-startup-other' },
 ] as const;
 
 // Labels and help the UI owns for known live settings, in both locales. A schema name
@@ -182,4 +186,7 @@ const liveSettingStrings = [
 /** Catalog keys that name a live setting (`settings.live.<name>`) or its help (`settings.live.<name>.help`). */
 export const LIVE_SETTING_KEYS: ReadonlySet<string> = new Set(liveSettingStrings.map((entry) => entry.key));
 
-export const settingsStrings = [...settingsBaseStrings, ...liveSettingStrings] as const;
+/** Catalog keys that label a read-only startup value (`settings.startup.<field>[.<sub_field>]`). */
+export const STARTUP_SETTING_KEYS: ReadonlySet<string> = new Set(startupSettingStrings.map((entry) => entry.key));
+
+export const settingsStrings = [...settingsBaseStrings, ...liveSettingStrings, ...startupSettingStrings] as const;

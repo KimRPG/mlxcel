@@ -1,36 +1,36 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 857373,
+    "embedded_asset_bytes": 878384,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 181895,
+    "initial_js_gzip_bytes": 186682,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 182508,
+    "total_js_gzip_bytes": 187294,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
-      "gzip_bytes": 613,
-      "path": "assets/code-highlight-ElpBPyJU.js",
-      "sha256": "09070ea9250ec88169b4dc568d33f75df59d16e5df0be1a5385aea523e5b1b5c"
+      "gzip_bytes": 612,
+      "path": "assets/code-highlight-DOcK4oR9.js",
+      "sha256": "b35d1579d4f9174c757d41f674e6d68ae414453b6781f303ba99d16562c7a29c"
     },
     {
-      "bytes": 138018,
-      "gzip_bytes": 21913,
-      "path": "assets/index-0JVegFfJ.css",
-      "sha256": "3e21904cb5fc5fe38d2c5a554d5c864aab43063e69acb7b89e4b0a324c1ead81"
+      "bytes": 138092,
+      "gzip_bytes": 21927,
+      "path": "assets/index-B8XA_0O-.css",
+      "sha256": "26f4c4f85c6611bb19cec62d8bb9361d26e92b26c887cf50e9297e2202e211dc"
     },
     {
-      "bytes": 700452,
-      "gzip_bytes": 180906,
-      "path": "assets/index-CO2DWqwC.js",
-      "sha256": "1e616eea2603841d5193f98fff026367eee629e4bc5aaf7624460e63bdd7a20b"
+      "bytes": 721389,
+      "gzip_bytes": 185693,
+      "path": "assets/index-D_pqxxQs.js",
+      "sha256": "87021041d43c994540051ee05e7e1e73633269aa762c01be9af56cc41534c4bd"
     },
     {
       "bytes": 503,
-      "gzip_bytes": 302,
+      "gzip_bytes": 303,
       "path": "index.html",
-      "sha256": "bf5ee98ed7cfaa0360d1c271a977516274d75862ca6c2005634ac530ccea1da6"
+      "sha256": "bd6406c9f4da3daf81b723d678e0093b8474a14250c0de2dcad86cd96ab6c7bb"
     },
     {
       "bytes": 2129,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "66dba836c219488f6a25ec28a9ccc60164cdac2e462f68a29c9a3522618f0dfc"
+  "source_digest_sha256": "948244fa93cbf41178ef0b50b608a55875f7bd530617b770bbbf64d489ad5b95"
 }
