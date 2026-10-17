@@ -383,6 +383,34 @@ pub fn fuse_lora_weights_into(
             );
         };
 
+        // An input embedding is `[vocab, hidden]` and its pair uses mlx-lm's
+        // `LoRAEmbedding` orientation, the transpose of a linear pair's, so it
+        // takes its own delta (#2421).
+        if super::embedding::is_input_embedding_weight(base_weight_name) {
+            // A packed table's columns are not the hidden width, and a delta
+            // whose width happened to equal them would be added to the packed
+            // words; refuse it by the `.scales` plane, not by shape.
+            let scales_name = format!("{}.scales", base_weight_name.trim_end_matches(".weight"));
+            if base_weights.contains_key(&scales_name) {
+                anyhow::bail!(
+                    "LoRA fusion refused for adapter layer {base_name}: {base_weight_name} is a \
+                     quantized embedding table, and fusing writes the delta into dense weights \
+                     only. Serve the adapter unfused with --lora, or use an unquantized checkpoint."
+                );
+            }
+            let fused = super::embedding::fuse_embedding_pair(
+                base_name,
+                base_weight_name,
+                base_weight,
+                lora_a,
+                lora_b,
+                scale,
+            )?;
+            base_weights.insert(base_weight_name.clone(), fused);
+            fused_count += 1;
+            continue;
+        }
+
         // Compute the LoRA delta: scale * (lora_b @ lora_a)
         let delta = compute_lora_delta(lora_a, lora_b, scale)?;
 

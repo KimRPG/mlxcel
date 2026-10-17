@@ -215,12 +215,22 @@ fn fused_global_scale_disabled() -> bool {
 /// Non-quantized embedding layer
 pub struct Embedding {
     pub weight: UniquePtr<MlxArray>,
+    /// Runtime (unfused) LoRA embedding terms (issue #2421), attached by
+    /// [`UnifiedEmbedding::from_weights`]; `None` when no adapter targets
+    /// this table. Boxed so the field costs one pointer: every model struct
+    /// holds its tables by value, and debug builds give each match arm of the
+    /// model-loading dispatchers its own stack slot for them, so a wider table
+    /// grows those frames past the 2 MiB default thread stack.
+    runtime_loras: Option<Box<crate::runtime_lora::EmbeddingLoraTerms>>,
 }
 
 impl Embedding {
     /// Create a new embedding layer
     pub fn new(weight: UniquePtr<MlxArray>) -> Self {
-        Self { weight }
+        Self {
+            weight,
+            runtime_loras: None,
+        }
     }
 
     /// Load from weight map
@@ -230,19 +240,27 @@ impl Embedding {
             .get(&weight_name)
             .map(|w| ffi::copy(w))
             .ok_or_else(|| format!("Weight not found: {}", weight_name))?;
-        Ok(Self { weight })
+        Ok(Self::new(weight))
     }
 
     /// Embedding lookup: indices -> embeddings
     pub fn forward(&self, indices: &MlxArray) -> UniquePtr<MlxArray> {
-        ffi::embedding(&self.weight, indices)
+        let y = ffi::embedding(&self.weight, indices);
+        match &self.runtime_loras {
+            Some(terms) => terms.apply_lookup(indices, y),
+            None => y,
+        }
     }
 
     /// Use embedding as linear projection (for tied embeddings/lm_head)
     /// y = x @ W (no transpose needed since embedding weight is [vocab, dim])
     pub fn as_linear(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let wt = ffi::transpose(&self.weight);
-        ffi::matmul(x, &wt)
+        let y = ffi::matmul(x, &wt);
+        match &self.runtime_loras {
+            Some(terms) => terms.apply_head(x, y),
+            None => y,
+        }
     }
 
     /// Produce an independent handle that shares the same underlying MLX
@@ -253,11 +271,12 @@ impl Embedding {
     /// (DFlash) that lazy-bind the target's embedding table at `bind()`
     /// time instead of loading their own `embed_tokens.weight`.
     ///
+    /// Runtime LoRA terms are not carried over, as in
+    /// [`Linear::clone_shared`]: a drafter binds the base table.
+    ///
     /// Used by: DFlash drafter lazy-bind path (`Drafter::bind`)
     pub fn clone_shared(&self) -> Self {
-        Self {
-            weight: ffi::copy(&self.weight),
-        }
+        Self::new(ffi::copy(&self.weight))
     }
 }
 
@@ -270,6 +289,13 @@ pub struct QuantizedEmbedding {
     pub group_size: i32,
     pub bits: i32,
     pub mode: String,
+    /// Runtime (unfused) LoRA embedding terms (issue #2421), attached by
+    /// [`UnifiedEmbedding::from_weights`]; `None` when no adapter targets
+    /// this table. Boxed so the field costs one pointer: every model struct
+    /// holds its tables by value, and debug builds give each match arm of the
+    /// model-loading dispatchers its own stack slot for them, so a wider table
+    /// grows those frames past the 2 MiB default thread stack.
+    runtime_loras: Option<Box<crate::runtime_lora::EmbeddingLoraTerms>>,
 }
 
 impl QuantizedEmbedding {
@@ -359,6 +385,7 @@ impl QuantizedEmbedding {
             group_size: layout.group_size,
             bits: layout.bits,
             mode: mode.to_string(),
+            runtime_loras: None,
         })
     }
 
@@ -371,7 +398,7 @@ impl QuantizedEmbedding {
 
     /// Quantized embedding lookup with dequantization
     pub fn forward(&self, indices: &MlxArray) -> UniquePtr<MlxArray> {
-        unsafe {
+        let y = unsafe {
             ffi::quantized_embedding(
                 &self.weight,
                 &self.scales,
@@ -381,12 +408,16 @@ impl QuantizedEmbedding {
                 self.bits,
                 &self.mode,
             )
+        };
+        match &self.runtime_loras {
+            Some(terms) => terms.apply_lookup(indices, y),
+            None => y,
         }
     }
 
     /// Use embedding as linear projection (for tied embeddings/lm_head)
     pub fn as_linear(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        unsafe {
+        let y = unsafe {
             ffi::quantized_linear_forward(
                 x,
                 &self.weight,
@@ -397,12 +428,17 @@ impl QuantizedEmbedding {
                 self.bits,
                 &self.mode,
             )
+        };
+        match &self.runtime_loras {
+            Some(terms) => terms.apply_head(x, y),
+            None => y,
         }
     }
 
     /// Produce an independent handle that shares the same underlying MLX
     /// weight / scales / biases buffers (lazy-array share via `ffi::copy`,
-    /// no element copy).
+    /// no element copy). Runtime LoRA terms are not carried over, as in
+    /// [`Embedding::clone_shared`].
     ///
     /// Used by: DFlash drafter lazy-bind path (`Drafter::bind`)
     pub fn clone_shared(&self) -> Self {
@@ -413,6 +449,7 @@ impl QuantizedEmbedding {
             group_size: self.group_size,
             bits: self.bits,
             mode: self.mode.clone(),
+            runtime_loras: None,
         }
     }
 }
@@ -427,6 +464,10 @@ impl UnifiedEmbedding {
     /// Load from weight map, auto-detecting quantization
     ///
     /// Detects quantization by checking for `.scales` key in weights.
+    ///
+    /// Claims the runtime LoRA embedding terms the loader staged for `prefix`
+    /// (issue #2421): the lookup adds them in [`Self::forward`] and the tied
+    /// head adds their transposed form in [`Self::as_linear`].
     pub fn from_weights(
         weights: &crate::weights::WeightMap,
         prefix: &str,
@@ -435,14 +476,48 @@ impl UnifiedEmbedding {
     ) -> Result<Self, String> {
         let scales_name = format!("{}.scales", prefix);
 
-        if weights.contains_key(&scales_name) {
+        let mut embedding = if weights.contains_key(&scales_name) {
             // Quantized embedding
-            Ok(Self::Quantized(QuantizedEmbedding::from_weights(
+            Self::Quantized(QuantizedEmbedding::from_weights(
                 weights, prefix, group_size, bits,
-            )?))
+            )?)
         } else {
             // Regular embedding
-            Ok(Self::Regular(Embedding::from_weights(weights, prefix)?))
+            Self::Regular(Embedding::from_weights(weights, prefix)?)
+        };
+        let terms = crate::runtime_lora::claim_embedding(prefix);
+        if !terms.is_empty() {
+            // The logical table shape: a packed table's width is its group
+            // count times the reconciled group size.
+            let (rows, width) = match &embedding {
+                Self::Regular(e) => {
+                    let shape = ffi::array_shape(&e.weight);
+                    (shape[0], shape[1])
+                }
+                Self::Quantized(e) => {
+                    let shape = ffi::array_shape(&e.scales);
+                    (shape[0], shape[1] * e.group_size)
+                }
+            };
+            let terms = crate::runtime_lora::EmbeddingLoraTerms::new(prefix, terms, rows, width)?;
+            match &mut embedding {
+                Self::Quantized(e) => e.runtime_loras = Some(Box::new(terms)),
+                Self::Regular(e) => e.runtime_loras = Some(Box::new(terms)),
+            }
+        }
+        Ok(embedding)
+    }
+
+    /// Whether any unfused LoRA embedding term currently applies to this table
+    /// (issue #2421). A future fused kernel that reads the table through
+    /// [`Self::weight`], [`Self::quantized`] or [`Self::dequantized_weight`]
+    /// instead of [`Self::forward`] / [`Self::as_linear`] must check this and
+    /// take the composable path, as the linear layers' fused kernels do.
+    #[must_use]
+    pub fn has_active_runtime_lora(&self) -> bool {
+        match self {
+            Self::Quantized(e) => e.runtime_loras.as_ref().is_some_and(|t| t.is_active()),
+            Self::Regular(e) => e.runtime_loras.as_ref().is_some_and(|t| t.is_active()),
         }
     }
 
@@ -516,6 +591,10 @@ impl UnifiedEmbedding {
     /// use-cases that need to pass the weight reference to an external op
     /// (e.g. [`crate::drafter::masked_embedder::MaskedEmbedder::forward`]).
     ///
+    /// The base table only: runtime LoRA embedding terms (issue #2421) are not
+    /// in it. A consumer that uses it in place of [`Self::forward`] or
+    /// [`Self::as_linear`] must check [`Self::has_active_runtime_lora`].
+    ///
     /// Used by: Gemma4AssistantDraftModel (centroid/MaskedEmbedder LM head path)
     pub fn weight(&self) -> &MlxArray {
         match self {
@@ -537,6 +616,8 @@ impl UnifiedEmbedding {
     /// The reference implementation measured `quantized_matmul(...,
     /// transpose=false)` several times slower at this shape, hence the
     /// dequantize-once approach.
+    /// Like [`Self::weight`], this is the base table without runtime LoRA
+    /// embedding terms.
     pub fn dequantized_weight(&self) -> UniquePtr<MlxArray> {
         match self {
             Self::Regular(e) => ffi::copy(&e.weight),
