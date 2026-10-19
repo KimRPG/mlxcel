@@ -300,10 +300,46 @@ fn apply_gemma3_defaults(text: &Value, mt: &str) -> Value {
     merged
 }
 
+/// Nemotron-H's per-layer block names (`layers_block_type`, or the
+/// transformers 5 alias `layer_types`) mapped to `hybrid_override_pattern`
+/// codes through the model's own table, the way `NemotronHConfig::post_init`
+/// derives the pattern. Going through the table keeps `linear_attention` (an
+/// `M` layer) out of the attention count, which a name match on "attention"
+/// would not.
+///
+/// `None` when the model is not Nemotron-H, when the config carries the
+/// pattern itself (the model reads that first), when there is no block-name
+/// array, or when a name is one the model would refuse to load.
+fn nemotron_h_block_codes(text: &Value, mt: &str) -> Option<Vec<&'static str>> {
+    let present = |key: &str| text.get(key).filter(|v| !v.is_null());
+    if mt != "nemotron_h" || present("hybrid_override_pattern").is_some() {
+        return None;
+    }
+    present("layers_block_type")
+        .or_else(|| present("layer_types"))?
+        .as_array()?
+        .iter()
+        .map(|entry| {
+            let name = entry.as_str()?;
+            crate::models::nemotron_h::NEMOTRON_H_BLOCK_NAMES
+                .iter()
+                .find(|(known, _)| *known == name)
+                .map(|(_, code)| *code)
+        })
+        .collect()
+}
+
 /// Classify a model's config into KV layer groups and an architecture kind.
 fn classify(text: &Value, model_type: &str) -> Option<(Vec<KvGroup>, KvArchKind)> {
-    let num_layers = get_u64(text, LAYER_COUNT_KEYS)?;
     let mt = model_type.to_ascii_lowercase();
+    // A transformers-saved Nemotron-H config describes its stack only through
+    // the block-name array, with no layer count: the model takes the count
+    // from the array length, and so does the estimate.
+    let nemotron_h_codes = nemotron_h_block_codes(text, &mt);
+    let num_layers = match &nemotron_h_codes {
+        Some(codes) => codes.len() as u64,
+        None => get_u64(text, LAYER_COUNT_KEYS)?,
+    };
     let owned_text = apply_gemma3_defaults(text, &mt);
     let text = &owned_text;
 
@@ -352,7 +388,11 @@ fn classify(text: &Value, model_type: &str) -> Option<(Vec<KvGroup>, KvArchKind)
     let dims = attn_dims(text)?;
 
     // 3. Hybrid attention + recurrent/SSM — only attention layers hold KV.
-    if let Some(n_attn) = count_attention_layers(text, num_layers) {
+    let n_attn = match &nemotron_h_codes {
+        Some(codes) => Some(codes.iter().filter(|code| **code == "*").count() as u64),
+        None => count_attention_layers(text, num_layers),
+    };
+    if let Some(n_attn) = n_attn {
         // RecurrentGemma bounds its attention layers to `attention_window_size`.
         let window = get_u64(text, &["attention_window_size"]);
         return Some((
@@ -526,6 +566,12 @@ pub fn estimate_kv_arch(
     batch: u64,
 ) -> Option<KvArchEstimate> {
     let config_str = std::fs::read_to_string(model_dir.join("config.json")).ok()?;
+    // Python's `json` writes `Infinity` / `NaN`, which serde rejects.
+    // Nemotron-H configs carry `time_step_limit: [0.0, Infinity]`
+    // (nvidia-nemotron-3-nano-30b-a3b-4bit among them), so without this the
+    // estimate is unavailable for them; the model loader sanitizes the same
+    // way (#2445).
+    let config_str = crate::models::sanitize_config_json(&config_str);
     let config: Value = serde_json::from_str(&config_str).ok()?;
     estimate_kv_arch_from_config(&config, ctx_len, int8_kv, batch)
 }
@@ -873,6 +919,76 @@ mod tests {
         let n_attn = 2; // two '*'
         let elems = 2 * 8 * 64;
         assert_eq!(e.total_bytes, n_attn * elems * 2048 * FP16);
+    }
+
+    /// A Nemotron-H `config.json` on disk carries `Infinity`, which serde
+    /// rejects; the file is sanitized the way the model loader does it, so
+    /// the estimate is available (#2445).
+    #[test]
+    fn a_config_file_with_infinity_still_estimates() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type": "nemotron_h", "num_attention_heads": 8,
+                "num_key_value_heads": 8, "head_dim": 64,
+                "time_step_limit": [0.0, Infinity],
+                "layer_types": ["mamba", "attention", "moe", "attention"]}"#,
+        )
+        .unwrap();
+        let e = estimate_kv_arch(dir.path(), 2048, false, 1).expect("estimate");
+        assert_eq!(e.kind, KvArchKind::Hybrid);
+        assert_eq!(e.total_bytes, 2 * (2 * 8 * 64) * 2048 * FP16);
+    }
+
+    /// A transformers 5 Nemotron-H config describes its stack only through
+    /// `layer_types`, with no layer count (#2445). It must estimate the same
+    /// as the equivalent `hybrid_override_pattern` config, with
+    /// `linear_attention` counted as the `M` layer it is. The same names in
+    /// `layers_block_type` alongside a layer count go through the model's
+    /// table too.
+    #[test]
+    fn nemotron_h_layer_types_match_the_equivalent_pattern() {
+        let pattern = json!({
+            "model_type": "nemotron_h",
+            "num_hidden_layers": 8,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "head_dim": 64,
+            "hybrid_override_pattern": "M*M-E*M-",
+        });
+        let names = json!([
+            "mamba",
+            "attention",
+            "linear_attention",
+            "mlp",
+            "moe",
+            "full_attention",
+            "conv",
+            "mlp",
+        ]);
+        let layer_types = json!({
+            "model_type": "nemotron_h",
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "head_dim": 64,
+            "layer_types": names,
+        });
+        let block_type = json!({
+            "model_type": "nemotron_h",
+            "num_hidden_layers": 8,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "head_dim": 64,
+            "layers_block_type": names,
+        });
+        let expected = est(&pattern, 2048);
+        assert_eq!(expected.kind, KvArchKind::Hybrid);
+        assert_eq!(expected.total_bytes, 2 * (2 * 8 * 64) * 2048 * FP16);
+        for cfg in [&layer_types, &block_type] {
+            let e = est(cfg, 2048);
+            assert_eq!(e.kind, KvArchKind::Hybrid, "{cfg}");
+            assert_eq!(e.total_bytes, expected.total_bytes, "{cfg}");
+        }
     }
 
     #[test]
