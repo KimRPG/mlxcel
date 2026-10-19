@@ -974,7 +974,12 @@ async fn route_chat(
         StreamFilter::new_primed_open_thinking()
     } else {
         StreamFilter::new()
-    };
+    }
+    // #2394: GLM-4.1V-Thinking's `<answer>` wrapper, as on the single-node
+    // route.
+    .with_answer_wrapper(crate::server::tool_calls::answer_wrapper_enabled(
+        &state.tokenizer,
+    ));
 
     // b10621 chat-parsing and reasoning-placement settings (issue #1447). This
     // route serves the same `/v1/chat/completions` as the single-node one, so
@@ -1083,6 +1088,18 @@ async fn route_chat(
                         close,
                     ))));
                 }
+                // #2394: the newlines the filter trims after a close marker
+                // stay in the thoughts-in-content form, as on the single-node
+                // route.
+                if reasoning_format.keeps_thoughts_in_content()
+                    && let Some(gap) = emit.post_thinking_gap.as_deref()
+                {
+                    let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
+                        &request_id_str2,
+                        &model,
+                        gap,
+                    ))));
+                }
                 if let Some(content) = emit.content
                     && !content.is_empty()
                 {
@@ -1116,6 +1133,7 @@ async fn route_chat(
                             consumed_positions: 1,
                             thinking_open: None,
                             thinking_close: None,
+                            post_thinking_gap: None,
                         });
                     } else {
                         emit_filtered(filter.feed(text));
@@ -1231,6 +1249,7 @@ async fn route_chat(
                             consumed_positions: 1,
                             thinking_open: None,
                             thinking_close: None,
+                            post_thinking_gap: None,
                         });
                     } else {
                         absorb(filter.feed(text));

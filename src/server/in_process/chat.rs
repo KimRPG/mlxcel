@@ -185,6 +185,7 @@ fn passthrough(token: &str) -> FilterOutput {
         consumed_positions: 1,
         thinking_open: None,
         thinking_close: None,
+        post_thinking_gap: None,
     }
 }
 
@@ -238,7 +239,9 @@ impl InProcessServer {
             StreamFilter::new_primed_open_thinking()
         } else {
             StreamFilter::new()
-        };
+        }
+        // #2394: GLM-4.1V-Thinking's `<answer>` wrapper, as on the HTTP routes.
+        .with_answer_wrapper(tool_calls::answer_wrapper_enabled(&state.tokenizer));
         let mut text = TurnText {
             raw: String::new(),
             content: String::new(),
