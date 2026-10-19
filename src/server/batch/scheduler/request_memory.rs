@@ -20,12 +20,30 @@ impl BatchScheduler {
     /// A sequential fallback inside batched prefill does not pass the final
     /// single-slot admission gate. Guarded workers must never enter that route,
     /// even when --max-batch-prefill allows collecting multiple queued rows.
+    ///
+    /// A head the speculative burst would serve takes `execute_prefill` too,
+    /// while no classic rows are decoding (#2442). The classic batched
+    /// prefill never reaches
+    /// `try_speculative_burst`, so before this, two or more queued requests
+    /// under the default `--max-batch-prefill 4` lost speculative decoding
+    /// entirely (B = 1 burst and batched window alike), and only
+    /// `--max-batch-prefill 1` reached the burst. That was not a design
+    /// choice: the batched prefill (60e50b0c) predates the speculative burst
+    /// (6a816947), the burst's window collector was written to drain these
+    /// same queued rows, and the 2026-10-07 batched MTP benchmark records the
+    /// skip as a pre-existing gap it had to work around. Queued equal-length
+    /// DFlash requests therefore reach the batched DFlash burst as one window
+    /// on a target that runs batched, and the B = 1 burst otherwise. A head
+    /// the burst would only decline
+    /// ([`Self::queued_head_takes_speculative_burst`] is false) keeps the
+    /// batched prefill, so a server without a drafter is unchanged.
     pub(super) fn execute_prefill_action(&mut self, seq_id: SequenceId) {
         if !self.request_memory_policy_enabled()
             && self.max_batch_prefill > 1
             && self.prefill_queue.len() >= 2
             && self.chunked_prefill_seq.is_none()
             && self.batched_prefill_admits_head()
+            && !self.queued_head_takes_speculative_burst()
         {
             self.execute_batched_prefill();
         } else {

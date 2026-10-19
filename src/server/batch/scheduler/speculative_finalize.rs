@@ -15,6 +15,85 @@
 use super::*;
 
 impl BatchScheduler {
+    /// Whether a queue of two or more should send its head to
+    /// [`Self::execute_prefill`] for a speculative burst instead of the classic
+    /// batched prefill, which never reaches [`Self::try_speculative_burst`]
+    /// (#2442).
+    ///
+    /// The decision is the head's alone: rows behind a declined head are
+    /// drained into the batched prefill with it, as before. It mirrors the
+    /// burst's gates without side effects, so a head the burst would only
+    /// decline keeps the batched prefill it had before:
+    ///
+    /// - an empty active batch. A run-to-completion burst holds the whole
+    ///   tick and admits nothing to the active batch, so while classic rows
+    ///   are decoding, routing each queued head to a burst would hold their
+    ///   decode off for as long as the queue stays non-empty; they keep the
+    ///   batched prefill instead, which fills the batch and lets decode run;
+    /// - unified shared KV budget, or the per-request gate
+    ///   ([`crate::server::batch::speculative_burst::should_burst_for_sequence`]);
+    /// - a busy tick-slice slot the head could not wait for;
+    /// - DFlash: the burst's own pre-drafter gates
+    ///   ([`crate::server::batch::speculative_burst::dflash_burst_would_engage`]).
+    ///   The head then runs the B = 1 burst, or a batched window when
+    ///   [`Self::dispatch_runs_batched_window`] allows one;
+    /// - MTP: only when the batched MTP burst is enabled, so the head can lead
+    ///   a window. With it off (the default) a queued window declines to
+    ///   classic decode by design, so concurrent MTP requests keep classic
+    ///   batched prefill and decode, B = 1 slice included.
+    pub(super) fn queued_head_takes_speculative_burst(&self) -> bool {
+        if !self.active_batch.is_empty()
+            || !self.speculative_dispatch.is_kind_specific()
+            || self.shared_kv_budget().is_some()
+        {
+            return false;
+        }
+        let Some(head) = self.prefill_queue.peek() else {
+            return false;
+        };
+        if !crate::server::batch::speculative_burst::should_burst_for_sequence(
+            &self.speculative_dispatch,
+            head,
+        ) {
+            return false;
+        }
+        if (self.speculative_slice.is_some() || !self.speculative_slice_backlog.is_empty())
+            && !self.can_wait_for_slice_grant(head)
+        {
+            return false;
+        }
+        match &self.speculative_dispatch {
+            crate::server::SpeculativeDispatch::DFlash { block_size, .. } => {
+                crate::server::batch::speculative_burst::dflash_burst_would_engage(
+                    self.engine.model(),
+                    &self.speculative_drafter_slot,
+                    *block_size,
+                    head,
+                )
+            }
+            crate::server::SpeculativeDispatch::Mtp { .. } => {
+                crate::server::batch::speculative_burst::mtp_batched_burst_enabled()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the configured dispatch can run a B > 1 window on this target.
+    /// A DFlash family that runs B = 1 only
+    /// ([`crate::server::batch::dflash_target::DFlashTargetModel::supports_batched`])
+    /// collects no window, so its head runs the B = 1 burst instead of a
+    /// window the batched arm can only decline to classic decode (#2442).
+    fn dispatch_runs_batched_window(&self) -> bool {
+        match &self.speculative_dispatch {
+            crate::server::SpeculativeDispatch::DFlash { .. } => {
+                crate::server::batch::speculative_burst::dflash_target_supports_batched(
+                    self.engine.model(),
+                ) == Some(true)
+            }
+            _ => true,
+        }
+    }
+
     pub(super) fn try_speculative_burst(&mut self, seq: SequenceInfo) -> Option<SequenceInfo> {
         if self.shared_kv_budget().is_some() {
             return Some(seq);
@@ -105,7 +184,9 @@ impl BatchScheduler {
         // valid lengths so greedy parity is preserved.
         let allow_ragged =
             crate::server::batch::speculative_burst::mtp_batched_ragged_window_enabled();
-        let window: Vec<SequenceInfo> = if max_batch_size > 1 && head_can_join_batched {
+        let collect_window =
+            max_batch_size > 1 && head_can_join_batched && self.dispatch_runs_batched_window();
+        let window: Vec<SequenceInfo> = if collect_window {
             let head_prompt_len = seq.prompt_tokens.len();
             let head_max_tokens = seq.max_tokens;
             let head_sampling = seq.sampling.clone();
