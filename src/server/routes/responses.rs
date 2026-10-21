@@ -66,6 +66,12 @@ fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
     super::generation_error_to_response(err)
 }
 
+use super::responses_auto_compact::{
+    AutoCompaction, apply_auto_compaction, cap_output_tokens, clamp_reasoning_budget, final_status,
+    mark_incomplete_output, parse_context_management, prepend_compaction_item,
+    send_compaction_events, stopped_at_limit,
+};
+
 use super::chat::{
     build_generate_options_with_live, build_prompt_cache_request_context,
     is_prompt_primed_open_thinking, parse_priority_header, validate_top_n_sigma,
@@ -85,6 +91,11 @@ pub async fn create_response(
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
     }
+    // `context_management` (issue #2397) is validated before any work.
+    let compact_threshold = match parse_context_management(request.context_management.as_ref()) {
+        Ok(threshold) => threshold,
+        Err(err) => return err.into_response(),
+    };
 
     // -- Translate Responses request → ChatCompletionRequest ---------------
     let mut translated = match responses_request_to_chat(
@@ -157,6 +168,28 @@ pub async fn create_response(
         return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
 
+    // Automatic compaction (issue #2397): count, and compact at the
+    // threshold, once the request is known to be valid. A rebuilt request
+    // repeats the video substitution its original went through above.
+    let auto = match compact_threshold {
+        None => None,
+        Some(threshold) => {
+            match apply_auto_compaction(&state, &live, &request, &mut translated, threshold).await {
+                Ok(auto) => Some(auto),
+                Err(err) => return err.into_response(),
+            }
+        }
+    };
+    if auto.as_ref().is_some_and(AutoCompaction::compacted)
+        && let Err(err) = crate::server::chat_request::expand_request_video_parts(
+            &state,
+            &mut translated.chat_request,
+        )
+        .await
+    {
+        return err.into_error_response().into_response();
+    }
+
     // Build the structured-output constraint up front: the `text.format`
     // json_schema, otherwise the forced tool-call grammar (#1319).
     let structured =
@@ -207,6 +240,7 @@ pub async fn create_response(
             budget_override,
             structured,
             resumable,
+            auto,
         )
         .await
     } else {
@@ -220,6 +254,7 @@ pub async fn create_response(
             priority,
             budget_override,
             structured,
+            auto,
         )
         .await
     }
@@ -238,6 +273,7 @@ async fn non_stream_create_response(
     structured: Option<
         std::sync::Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>,
     >,
+    auto: Option<AutoCompaction>,
 ) -> Response {
     if !state.can_accept_request() {
         return ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
@@ -287,6 +323,13 @@ async fn non_stream_create_response(
         &live,
         amplified,
     );
+    // Output cap at the remaining context, for `context_management`
+    // requests only (issue #2397, mlx-vlm#2458).
+    if let Some(auto) = auto.as_ref()
+        && let Err(err) = cap_output_tokens(&state, auto, &prepared, &mut options.max_tokens)
+    {
+        return err.into_response();
+    }
     options.priority = priority;
     // per-request Gemma 4 image soft-token budget, resolved and validated from
     // the translated `image_url` content parts. `None` when unset.
@@ -298,6 +341,11 @@ async fn non_stream_create_response(
     // native renderer closes. `None` for every template-rendered request.
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.reasoning_budget = budget_override;
+    // The budget was validated against the uncapped limit; keep it below the
+    // capped one (issue #2397).
+    if auto.is_some() {
+        clamp_reasoning_budget(&mut options.reasoning_budget, options.max_tokens);
+    }
     // The prompt may already leave generation inside an open thinking block
     // (a template that primes `<think>\n`, #2123): the scheduler's
     // `ThinkingState` then counts reasoning from the first token, as on
@@ -391,12 +439,13 @@ async fn non_stream_create_response(
     }
 
     let completed_at = chrono::Utc::now().timestamp() as f64;
-    let response = build_response_object(OutboundContext {
+    let (status, incomplete_reason) = final_status(auto.as_ref(), &result.finish_reason);
+    let mut response = build_response_object(OutboundContext {
         response_id: response_id.clone(),
         model_id: model_id.clone(),
         created_at,
         completed_at,
-        status: ResponseStatus::Completed,
+        status,
         prompt_tokens: result.prompt_tokens,
         completion_tokens: result.completion_tokens,
         cached_tokens: result.cached_tokens,
@@ -407,9 +456,11 @@ async fn non_stream_create_response(
         max_tool_calls: request.max_tool_calls,
         request: &request,
         error: None,
-        incomplete_reason: None,
+        incomplete_reason,
         finish_reason: result.finish_reason.clone(),
     });
+    prepend_compaction_item(auto.as_ref(), &mut response);
+    mark_incomplete_output(&mut response);
 
     persist_response(&state, &request, &translated, &response);
 
@@ -430,6 +481,7 @@ async fn stream_create_response(
         std::sync::Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>,
     >,
     resumable: super::chat::ResumableStreamContext,
+    auto: Option<AutoCompaction>,
 ) -> Response {
     if !state.can_accept_request() {
         return ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
@@ -479,6 +531,13 @@ async fn stream_create_response(
         &live,
         amplified,
     );
+    // Output cap at the remaining context, for `context_management`
+    // requests only (issue #2397, mlx-vlm#2458).
+    if let Some(auto) = auto.as_ref()
+        && let Err(err) = cap_output_tokens(&state, auto, &prepared, &mut options.max_tokens)
+    {
+        return err.into_response();
+    }
     options.priority = priority;
     // per-request Gemma 4 image soft-token budget, resolved and validated from
     // the translated `image_url` content parts. `None` when unset.
@@ -490,6 +549,11 @@ async fn stream_create_response(
     // native renderer closes. `None` for every template-rendered request.
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.reasoning_budget = budget_override;
+    // The budget was validated against the uncapped limit; keep it below the
+    // capped one (issue #2397).
+    if auto.is_some() {
+        clamp_reasoning_budget(&mut options.reasoning_budget, options.max_tokens);
+    }
     // The prompt may already leave generation inside an open thinking block
     // (a template that primes `<think>\n`, #2123): the scheduler's
     // `ThinkingState` then counts reasoning from the first token, as on
@@ -589,6 +653,9 @@ async fn stream_create_response(
             sequence_number: emitter.next_seq(),
             response: initial_response,
         });
+        // Automatic compaction ran before the stream opened (issue #2397):
+        // report it and emit its item at output_index 0.
+        send_compaction_events(&sender, &mut emitter, &response_id_for_task, auto.as_ref());
 
         // Lazy envelope state: we don't open the message or reasoning
         // item until the first matching chunk arrives, so we can emit
@@ -967,10 +1034,16 @@ async fn stream_create_response(
                 content_index: 0,
                 part: ResponseOutputContent::output_text(message_text.clone()),
             });
-            let msg_item = ResponseOutputItem::Message(ResponseOutputMessage::new_assistant(
+            let mut message = ResponseOutputMessage::new_assistant(
                 closed_msg_id.clone(),
                 vec![ResponseOutputContent::output_text(message_text.clone())],
-            ));
+            );
+            // A `context_management` reply cut off at its output limit
+            // (issue #2397).
+            if stopped_at_limit(auto.as_ref(), &result.finish_reason) {
+                message.status = ResponseItemStatus::Incomplete;
+            }
+            let msg_item = ResponseOutputItem::Message(message);
             let seq = em.next_seq();
             let _ = sender.send_event(&ResponseStreamEvent::OutputItemDone {
                 sequence_number: seq,
@@ -1017,12 +1090,13 @@ async fn stream_create_response(
         // outbound assembly fills the canonical output[] for the
         // "completed" event payload.
         let completed_at_now = chrono::Utc::now().timestamp() as f64;
+        let (status, incomplete_reason) = final_status(auto.as_ref(), &result.finish_reason);
         let mut final_response = build_response_object(OutboundContext {
             response_id: response_id_for_task.clone(),
             model_id: model_id_for_task,
             created_at,
             completed_at: completed_at_now,
-            status: ResponseStatus::Completed,
+            status,
             prompt_tokens: result.prompt_tokens,
             completion_tokens: result.completion_tokens,
             cached_tokens: result.cached_tokens,
@@ -1036,7 +1110,7 @@ async fn stream_create_response(
             max_tool_calls: request_for_task.max_tool_calls,
             request: &request_for_task,
             error: None,
-            incomplete_reason: None,
+            incomplete_reason,
             finish_reason: result.finish_reason.clone(),
         });
 
@@ -1053,10 +1127,20 @@ async fn stream_create_response(
             }
         }
 
+        prepend_compaction_item(auto.as_ref(), &mut final_response);
+        mark_incomplete_output(&mut final_response);
+
         let seq = em.next_seq();
-        let _ = sender.send_event(&ResponseStreamEvent::Completed {
-            sequence_number: seq,
-            response: final_response.clone(),
+        let _ = sender.send_event(&if status == ResponseStatus::Incomplete {
+            ResponseStreamEvent::Incomplete {
+                sequence_number: seq,
+                response: final_response.clone(),
+            }
+        } else {
+            ResponseStreamEvent::Completed {
+                sequence_number: seq,
+                response: final_response.clone(),
+            }
         });
 
         persist_response(
