@@ -1901,6 +1901,15 @@ pub(super) fn run_generation_mode(
         // (#1168).
         reject_dflash_drafter_offline(draft_model_path)?;
 
+        // A target the classic walk must refuse (#2495) fails here, before a
+        // full draft checkpoint is loaded for nothing. `generate` keeps the
+        // same gate as the authority (it also covers the draft).
+        if let Some(reason) = mlxcel::prompt_lookup_unsupported_reason(model) {
+            return Err(classic_speculative_refusal(
+                mlxcel::SpeculativeGenerateError::TargetUnsupported(reason),
+            ));
+        }
+
         println!("Loading draft model from {:?}...", draft_model_path);
         let (draft_model, _draft_tokenizer) = select_backend().load_model(draft_model_path)?;
         println!("Draft model loaded.");
@@ -1943,7 +1952,8 @@ pub(super) fn run_generation_mode(
                  kind-specific `{generator}` round loop on this target model. \
                  The runtime wiring lands in {tracker}. For now, omit \
                  `--draft-kind` to use the classic SpeculativeGenerator with \
-                 your `--draft-model` drafter.",
+                 your `--draft-model` drafter (it refuses targets whose state a cache \
+                 trim cannot roll back).",
                 kind = resolved_kind,
                 generator = match resolved_kind {
                     DrafterKind::Mtp => "MtpGenerator",
@@ -2004,14 +2014,20 @@ pub(super) fn run_generation_mode(
             mlxcel::SpeculativeGenerator::new(main_num_layers, draft_num_layers)
                 .with_token_bias(token_bias);
 
-        let result = spec_generator.generate(
-            model,
-            &draft_model,
-            prompt_tokens,
-            args.generation.max_tokens,
-            args.model.num_draft_tokens,
-            sampling_config,
-        );
+        // A refused pair (a model whose state a cache trim cannot roll back,
+        // #2495) stops here, before the acceptance summary below. The prompt-
+        // lookup and engine drafter paths apply the same rule, so plain
+        // generation is the alternative for such a model.
+        let result = spec_generator
+            .generate(
+                model,
+                &draft_model,
+                prompt_tokens,
+                args.generation.max_tokens,
+                args.model.num_draft_tokens,
+                sampling_config,
+            )
+            .map_err(classic_speculative_refusal)?;
 
         // The CLI installs no tracing subscriber, so the info-level acceptance
         // instrumentation inside `SpeculativeGenerator` never reaches a
@@ -2161,6 +2177,17 @@ fn should_route_offline_mtp(
     // still auto-resolve to the DFlash default and keep the classic
     // SpeculativeGenerator (the small-full-model-as-drafter workflow).
     resolved_kind == DrafterKind::Mtp
+}
+
+/// The error for a classic `--draft-model` run that the speculative gate
+/// refused (#2495): the library reason plus the CLI remedy. Shared by the
+/// early target check and the `generate` call so the text cannot drift.
+fn classic_speculative_refusal(err: mlxcel::SpeculativeGenerateError) -> anyhow::Error {
+    anyhow!(
+        "{err}. The classic --draft-model speculative path rolls a rejected draft back by \
+         trimming the external KV caches, which this model pair does not support; run \
+         without --draft-model to generate normally."
+    )
 }
 
 /// Reject a DFlash speculative drafter before the offline path tries to load
