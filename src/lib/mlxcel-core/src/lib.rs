@@ -793,10 +793,17 @@ mod ffi {
         /// Used by: StarCoder2 and other precise GELU-based models
         fn compiled_gelu(x: &MlxArray) -> UniquePtr<MlxArray>;
 
-        /// Compiled gelu_approx: erf-based GELU (x * 0.5 * (1 + erf(x / sqrt(2))))
-        /// Uses erf instead of tanh for numerical stability with bf16 inputs.
-        /// Used by: legacy/tests
+        /// Compiled `gelu_approx`: despite the name, the exact erf GELU
+        /// `x * 0.5 * (1 + erf(x / sqrt(2)))` (MLX `nn.gelu`), not MLX's tanh
+        /// `nn.gelu_approx`. For the tanh form use `gelu_tanh` (#2423).
+        /// Used by: tests only.
         fn compiled_gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray>;
+
+        /// Compiled tanh GELU evaluated in f32 and cast back: one fused kernel
+        /// for the eager `gelu_tanh_f32` chain. Can differ from it by f32
+        /// rounding (FMA contraction inside the fused kernel).
+        /// Used by: `GeluActivation::TanhF32Compiled` (#2423).
+        fn compiled_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Compiled GeGLU activation: gelu(gate) * x — single fused kernel
         /// Used by: legacy/tests for precise GeGLU
@@ -807,7 +814,8 @@ mod ffi {
         fn compiled_geglu_approx_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
-        /// gelu_approx(max(0, x - (mean + std * multiplier)))
+        /// erf_gelu(max(0, x - (mean + std * multiplier))). Upstream applies the
+        /// tanh GELU here; see the C++ note (#2423).
         /// Used by: Gemma3n MLP layers with activation_sparsity > 0
         fn compiled_gelu_topk(x: &MlxArray, std_multiplier: f32) -> UniquePtr<MlxArray>;
 
@@ -1077,8 +1085,21 @@ mod ffi {
         /// GELU activation
         fn gelu(a: &MlxArray) -> UniquePtr<MlxArray>;
 
-        /// Approximate GELU (erf-based for numerical stability)
+        /// Exact erf GELU despite the name: `x * 0.5 * (1 + erf(x / sqrt(2)))`,
+        /// MLX `nn.gelu`. NOT MLX `nn.gelu_approx` / `nn.GELU(approx="precise")`,
+        /// which are the tanh form (`gelu_tanh`). See
+        /// `mlxcel_core::utils::GeluActivation` for an explicit selector (#2423).
         fn gelu_approx(a: &MlxArray) -> UniquePtr<MlxArray>;
+
+        /// tanh-approximate GELU in the input dtype: MLX `nn.gelu_approx` /
+        /// `nn.GELU(approx="precise" | "tanh")`, built on the C++
+        /// `gelu_tanh_approx` helper the fused GeGLU kernels use.
+        fn gelu_tanh(a: &MlxArray) -> UniquePtr<MlxArray>;
+
+        /// tanh-approximate GELU evaluated in f32 and cast back to the input
+        /// dtype (Hugging Face `gelu_pytorch_tanh` as the SigLIP, Molmo2 and
+        /// Qwen3-VL encoders compute it).
+        fn gelu_tanh_f32(a: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// ReLU activation
         fn relu(a: &MlxArray) -> UniquePtr<MlxArray>;

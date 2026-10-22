@@ -2555,6 +2555,7 @@ fn shapeless_compile_audit_harness() {
             eval(&compiled_gpt_oss_swiglu_activation(&gpt_linear, &gpt_glu));
             eval(&compiled_gelu(&x));
             eval(&compiled_gelu_approx(&x));
+            eval(&compiled_gelu_tanh_f32(&x));
             eval(&compiled_geglu_activation(&gate, &x));
             eval(&compiled_geglu_approx_activation(&gate, &x));
             eval(&compiled_gelu_topk(&x, 0.75));
@@ -2761,6 +2762,7 @@ fn shapeless_compile_audit_harness() {
         "compiled_gpt_oss_swiglu_activation",
         "compiled_gelu",
         "compiled_gelu_approx",
+        "compiled_gelu_tanh_f32",
         "compiled_geglu_activation",
         "compiled_geglu_approx_activation",
         "compiled_gelu_topk",
@@ -4971,7 +4973,7 @@ fn activation_helpers_return_the_input_dtype() {
         (crate::dtype::FLOAT32, "f32"),
     ] {
         let x = full_f32(&[4, 8], 0.75, dtype);
-        let cases: [(&str, UniquePtr<MlxArray>); 9] = [
+        let cases: [(&str, UniquePtr<MlxArray>); 12] = [
             ("qwen4_activate", qwen4_hyper_activate(&x, 4)),
             ("qwen4_gate", qwen4_hyper_gate(&x, 4)),
             ("qwen4_mix", qwen4_hyper_mix(&x, &x)),
@@ -4979,6 +4981,9 @@ fn activation_helpers_return_the_input_dtype() {
             ("silu", silu(&x)),
             ("gelu", gelu(&x)),
             ("gelu_approx", gelu_approx(&x)),
+            ("gelu_tanh", gelu_tanh(&x)),
+            ("gelu_tanh_f32", gelu_tanh_f32(&x)),
+            ("compiled_gelu_tanh_f32", compiled_gelu_tanh_f32(&x)),
             ("relu", relu(&x)),
             ("leaky_relu", leaky_relu(&x, 0.01)),
         ];
