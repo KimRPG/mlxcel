@@ -27,6 +27,11 @@ pub struct Moge3Encoder {
     projections: Vec<Conv2d>,
 }
 impl Moge3Encoder {
+    pub(super) fn with_objects_policy(mut self) -> Self {
+        self.encoder.backbone = self.encoder.backbone.with_objects_policy();
+        self
+    }
+
     pub fn from_weights(weights: &WeightMap, config: &EncoderConfig) -> Result<Self> {
         let dino_config = config.dinov2()?;
         let backbone = Dinov2::from_hf_weights(weights, dino_config, "encoder.backbone")
@@ -53,7 +58,30 @@ impl Moge3Encoder {
         rows: usize,
         cols: usize,
     ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
+        #[cfg(test)]
+        super::diagnostics::encoder_input(
+            image,
+            rows,
+            cols,
+            self.encoder.config.patch_size,
+            if self.encoder.backbone.uses_objects_policy() {
+                super::policy::Policy::Objects
+            } else {
+                super::policy::Policy::Standard
+            },
+        )?;
         let features = self.encoder.call(image, rows, cols)?;
+        #[cfg(test)]
+        for (layer, (grid, cls)) in self
+            .encoder
+            .config
+            .intermediate_layers
+            .iter()
+            .zip(&features)
+        {
+            super::diagnostics::emit(&format!("moge.encoder.layer{layer}.grid"), grid)?;
+            super::diagnostics::emit(&format!("moge.encoder.layer{layer}.cls"), cls)?;
+        }
         ensure!(
             features.len() == self.projections.len(),
             "MoGe3 encoder feature count mismatch"
@@ -67,6 +95,9 @@ impl Moge3Encoder {
             })
         }
         let cls = mlxcel_core::copy(&features.last().expect("four features").1);
-        Ok((projected.expect("four projections"), cls))
+        let projected = projected.expect("four projections");
+        #[cfg(test)]
+        super::diagnostics::emit("moge.encoder.projected", &projected)?;
+        Ok((projected, cls))
     }
 }

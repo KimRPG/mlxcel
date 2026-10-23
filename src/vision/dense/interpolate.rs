@@ -454,3 +454,10 @@ pub fn grid_sample_host(
 #[cfg(test)]
 #[path = "interpolate_tests.rs"]
 mod tests;
+
+#[path = "interpolate_objects.rs"]
+mod objects;
+pub(crate) use objects::{
+    resize_bicubic_objects_nhwc, resize_bilinear_objects_nhwc,
+    resize_bilinear_objects_nhwc_with_antialias, resize_nearest_objects_nhwc,
+};

@@ -1408,6 +1408,49 @@ mod ffi {
             cos: &MlxArray,
         ) -> UniquePtr<MlxArray>;
 
+        /// SAM Objects x * (1 + scale) + shift, with checked broadcasting/dtypes.
+        fn compiled_objects_modulate(
+            x: &MlxArray,
+            scale: &MlxArray,
+            shift: &MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// SAM Objects x + h * gate; checks broadcasting into x and matching dtypes.
+        fn compiled_objects_gated_residual(
+            x: &MlxArray,
+            h: &MlxArray,
+            gate: &MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// SAM Objects/DINO exact erf GELU with weak scalars in input dtype.
+        fn compiled_objects_gelu(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+
+        /// SAM Objects tanh GELU with the upstream Power(x, 3) primitive.
+        fn compiled_objects_gelu_tanh(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+
+        /// Objects-only bundled MoGe focal solver, eager initialization plus 30
+        /// compiled steps. Checks F32 UV[B,N,2]/XYZ[B,N,3]; returns F32[B,2]
+        /// columns focal, shift. Mask/degenerate fallback belongs to the caller.
+        fn compiled_objects_focal_shift(
+            uv: &MlxArray,
+            xyz: &MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// Diagnostic initial plus 30 states from the identical solver graph.
+        /// F32[31,B,7]: shift, lambda, done, cost, gradient, Hessian, focal.
+        /// Bool done is cast only for this diagnostic output.
+        fn objects_focal_shift_states_for_test(
+            uv: &MlxArray,
+            xyz: &MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// SAM Objects F32 head normalization with a cast back to input dtype.
+        /// Expects BNHW x and HW gamma of the same floating dtype.
+        fn compiled_objects_head_norm(
+            x: &MlxArray,
+            gamma: &MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Compiled Gemma 4 Q-path with proportional RoPE:
         /// `reshape → fast::rms_norm → transpose → full-head ProportionalRoPE`
         /// folded into one compile window. `q_proj_out` is shaped
@@ -4526,3 +4569,7 @@ fn pin_full_precision_f32_matmuls_for_tests() {
         unsafe { std::env::set_var("MLX_ENABLE_TF32", "0") };
     }
 }
+
+#[cfg(test)]
+#[path = "objects_focal_tests.rs"]
+mod objects_focal_tests;

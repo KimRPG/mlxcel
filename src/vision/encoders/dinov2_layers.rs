@@ -235,6 +235,10 @@ impl Attention {
     }
 
     pub fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>> {
+        self.forward_with_policy(x, false)
+    }
+
+    fn forward_with_policy(&self, x: &MlxArray, objects: bool) -> Result<UniquePtr<MlxArray>> {
         let shape = mlxcel_core::array_shape(x);
         ensure!(
             shape.len() == 3
@@ -252,7 +256,7 @@ impl Attention {
             "DINOv2 attention token count exceeds the safety limit {MAX_DINOV2_BATCH_SEQUENCE_TOKENS}"
         );
         let (batch, tokens) = (shape[0], shape[1]);
-        let qkv = self.qkv.forward(x);
+        let qkv = policy::linear_with_policy(&self.qkv, x, objects);
         let split = |part: i32| {
             let start = part * (self.num_heads * self.head_dim) as i32;
             let value = mlxcel_core::slice(
@@ -278,7 +282,7 @@ impl Attention {
             &attended,
             &[batch, tokens, (self.num_heads * self.head_dim) as i32],
         );
-        Ok(self.proj.forward(&attended))
+        Ok(policy::linear_with_policy(&self.proj, &attended, objects))
     }
 }
 
@@ -453,12 +457,33 @@ impl Block {
     }
 
     pub(super) fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>> {
-        let attention = self.attention.forward(&self.norm1.forward(x))?;
+        self.forward_with_norm_policy(x, false)
+    }
+
+    pub(super) fn forward_with_norm_policy(
+        &self,
+        x: &MlxArray,
+        upcast: bool,
+    ) -> Result<UniquePtr<MlxArray>> {
+        let normalized = norm_with_policy(&self.norm1, x, upcast);
+        let attention = if upcast {
+            self.attention.forward_objects(&normalized)?
+        } else {
+            self.attention.forward(&normalized)?
+        };
         let x = mlxcel_core::add(x, &mlxcel_core::multiply(&attention, &self.scale1));
-        let mlp = self.mlp.forward(&self.norm2.forward(&x));
+        let normalized = norm_with_policy(&self.norm2, &x, upcast);
+        let mlp = match &self.mlp {
+            FeedForward::Mlp(mlp) if upcast => mlp.forward_objects(&normalized)?,
+            _ => self.mlp.forward(&normalized),
+        };
         Ok(mlxcel_core::add(
             &x,
             &mlxcel_core::multiply(&mlp, &self.scale2),
         ))
     }
 }
+
+#[path = "dinov2_policy.rs"]
+mod policy;
+pub(super) use policy::norm_with_policy;

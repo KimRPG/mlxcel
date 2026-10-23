@@ -14,15 +14,20 @@
 
 //! MoGe3 monocular geometry prediction.
 
+#[cfg(test)]
+pub(crate) mod diagnostics;
+
 mod config;
 mod config_components;
 mod conv_stack;
 mod encoder;
 mod geometry;
 mod model;
+mod policy;
 mod processor;
 pub mod refiner;
 pub mod sparse;
+mod sparse_budget;
 mod sparse_pool;
 mod sparse_shape;
 mod weights;
