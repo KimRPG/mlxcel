@@ -1673,6 +1673,87 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
     out
 }
 
+// ── Preflight verdict ────────────────────────────────────────────────────────
+
+/// Remediation tail `mlxcel serve` appends to the `--estimate-memory` abort.
+///
+/// A `serve` operator can shrink the context window or the batch, so the
+/// wording differs from [`GENERATE_PREFLIGHT_REMEDIATION`]. Passed to
+/// [`enforce_preflight`] by the call site and asserted by the message tests, so
+/// the shipped text and the pinned text cannot drift apart. Issue #1699.
+pub const SERVE_PREFLIGHT_REMEDIATION: &str =
+    "a smaller --ctx-size, smaller --max-batch-size, or a smaller model.";
+
+/// Remediation tail `mlxcel generate` appends to the `--estimate-memory` abort.
+///
+/// `generate` has no `--ctx-size` or `--max-batch-size` to shrink; the lever is
+/// the token budget. See [`SERVE_PREFLIGHT_REMEDIATION`]. Issue #1699.
+pub const GENERATE_PREFLIGHT_REMEDIATION: &str = "a smaller --max-tokens / a smaller model.";
+
+/// Render the `--force` warning printed when the preflight says the load is
+/// over budget but the caller asked to continue anyway.
+///
+/// Shared by `mlxcel serve` and `mlxcel generate` so the two commands cannot
+/// drift apart on wording. Issue #1699.
+///
+/// Used by: [`enforce_preflight`] (on behalf of `src/commands/serve.rs` and
+/// `src/commands/generate.rs`).
+#[must_use]
+fn preflight_over_budget_warning(est: &MemoryEstimate) -> String {
+    format!(
+        "WARNING: --estimate-memory preflight says this load is over budget by {}. \
+         Continuing because --force was set.",
+        format_bytes(est.overflow_bytes()),
+    )
+}
+
+/// Render the `--estimate-memory` abort message for an over-budget load.
+///
+/// `remediation` is the caller-specific tail after the shared override hint
+/// (`--force` / `--no-memory-check`): pass
+/// [`SERVE_PREFLIGHT_REMEDIATION`] or [`GENERATE_PREFLIGHT_REMEDIATION`].
+/// Everything before it is shared so the two commands stay consistent.
+///
+/// Used by: [`enforce_preflight`] (on behalf of `src/commands/serve.rs` and
+/// `src/commands/generate.rs`).
+#[must_use]
+fn preflight_over_budget_error(est: &MemoryEstimate, remediation: &str) -> String {
+    format!(
+        "--estimate-memory: total {} exceeds available {} by {}. \
+         Pass --force (or --no-memory-check) to override, or rerun with {remediation}",
+        format_bytes(est.total_bytes),
+        format_bytes(est.available_bytes),
+        format_bytes(est.overflow_bytes()),
+    )
+}
+
+/// Apply the already-computed `--estimate-memory` verdict.
+///
+/// Returns `Ok(())` when the estimate fits, warns and returns `Ok(())` when it
+/// does not fit and `force_memory` is set, and returns the abort error from
+/// `preflight_over_budget_error` otherwise. The estimate banner is the
+/// caller's responsibility; this only handles the verdict.
+///
+/// Used by: `src/commands/serve.rs` (`run_serve_memory_preflight`),
+/// `src/commands/generate.rs` (`run_memory_preflight`).
+pub fn enforce_preflight(
+    est: &MemoryEstimate,
+    force_memory: bool,
+    remediation: &str,
+) -> anyhow::Result<()> {
+    if est.fits {
+        return Ok(());
+    }
+    if force_memory {
+        eprintln!("{}", preflight_over_budget_warning(est));
+        return Ok(());
+    }
+    Err(anyhow::Error::msg(preflight_over_budget_error(
+        est,
+        remediation,
+    )))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1743,6 +1824,130 @@ mod tests {
         let mut f = std::fs::File::create(dir.join("model.safetensors.index.json")).unwrap();
         f.write_all(s.as_bytes()).unwrap();
         std::fs::File::create(dir.join("x.safetensors")).unwrap();
+    }
+
+    #[test]
+    fn preflight_error_message_is_pinned_per_remediation() {
+        // Issue #1699: this text used to be copy-pasted into `serve.rs` and
+        // `generate.rs`. The shared renderer must reproduce both variants
+        // byte-for-byte so operators (and docs) keep matching log lines.
+        let est = MemoryEstimate {
+            total_bytes: 20 * GIB,
+            available_bytes: 16 * GIB,
+            fits: false,
+            ..over_budget_fixture()
+        };
+
+        let serve = preflight_over_budget_error(&est, SERVE_PREFLIGHT_REMEDIATION);
+        assert_eq!(
+            serve,
+            "--estimate-memory: total 20.00 GiB (21474836480 bytes) exceeds available \
+             16.00 GiB (17179869184 bytes) by 4.00 GiB (4294967296 bytes). \
+             Pass --force (or --no-memory-check) to override, or rerun with \
+             a smaller --ctx-size, smaller --max-batch-size, or a smaller model."
+        );
+
+        let generate = preflight_over_budget_error(&est, GENERATE_PREFLIGHT_REMEDIATION);
+        assert_eq!(
+            generate,
+            "--estimate-memory: total 20.00 GiB (21474836480 bytes) exceeds available \
+             16.00 GiB (17179869184 bytes) by 4.00 GiB (4294967296 bytes). \
+             Pass --force (or --no-memory-check) to override, or rerun with \
+             a smaller --max-tokens / a smaller model."
+        );
+
+        // The constants are what the commands actually pass, so pinning them to
+        // the literal tails is what keeps shipped text and this test in sync.
+        assert_eq!(
+            SERVE_PREFLIGHT_REMEDIATION,
+            "a smaller --ctx-size, smaller --max-batch-size, or a smaller model."
+        );
+        assert_eq!(
+            GENERATE_PREFLIGHT_REMEDIATION,
+            "a smaller --max-tokens / a smaller model."
+        );
+
+        // Shared prefix, different remediation only. If this ever stops being
+        // a strict prefix relationship, the two commands have diverged again.
+        let shared = serve
+            .strip_suffix(SERVE_PREFLIGHT_REMEDIATION)
+            .expect("serve remediation suffix");
+        assert_eq!(
+            shared,
+            generate
+                .strip_suffix(GENERATE_PREFLIGHT_REMEDIATION)
+                .expect("generate remediation suffix")
+        );
+    }
+
+    #[test]
+    fn preflight_warning_message_is_pinned() {
+        let est = MemoryEstimate {
+            total_bytes: 20 * GIB,
+            available_bytes: 16 * GIB,
+            fits: false,
+            ..over_budget_fixture()
+        };
+        assert_eq!(
+            preflight_over_budget_warning(&est),
+            "WARNING: --estimate-memory preflight says this load is over budget by \
+             4.00 GiB (4294967296 bytes). Continuing because --force was set."
+        );
+    }
+
+    #[test]
+    fn enforce_preflight_passes_when_the_estimate_fits() {
+        let est = MemoryEstimate {
+            total_bytes: 8 * GIB,
+            available_bytes: 16 * GIB,
+            fits: true,
+            ..over_budget_fixture()
+        };
+        assert!(enforce_preflight(&est, false, "anything").is_ok());
+        assert!(enforce_preflight(&est, true, "anything").is_ok());
+    }
+
+    #[test]
+    fn enforce_preflight_warns_under_force_and_aborts_otherwise() {
+        let est = MemoryEstimate {
+            total_bytes: 20 * GIB,
+            available_bytes: 16 * GIB,
+            fits: false,
+            ..over_budget_fixture()
+        };
+        assert!(
+            enforce_preflight(&est, true, "a smaller model.").is_ok(),
+            "--force must keep the run alive"
+        );
+        let err = enforce_preflight(&est, false, "a smaller model.")
+            .expect_err("over budget without --force must abort");
+        assert_eq!(
+            err.to_string(),
+            preflight_over_budget_error(&est, "a smaller model.")
+        );
+    }
+
+    /// Minimal over-budget-capable fixture; the pinned-message tests only care
+    /// about the byte figures they override explicitly.
+    fn over_budget_fixture() -> MemoryEstimate {
+        MemoryEstimate {
+            weights_bytes: 0,
+            kv_cache_bytes: 0,
+            runtime_headroom_bytes: 0,
+            activation_bytes: 0,
+            backend_inflight_bytes: 0,
+            total_bytes: 0,
+            available_bytes: 0,
+            fits: true,
+            weights_source: WeightsSource::Fallback,
+            kv_source: KvSource::Unavailable,
+            kv_detail: String::new(),
+            headroom_factor: DEFAULT_HEADROOM_FACTOR,
+            ctx_len: 1,
+            batch: 1,
+            quant: QuantHint::Default,
+            kv_dtype_int8: false,
+        }
     }
 
     #[test]
