@@ -345,7 +345,11 @@ fn arch_json_output_is_stable_registry_json() {
     let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(value["mlxcel_version"], env!("CARGO_PKG_VERSION"));
     let families = value["families"].as_array().unwrap();
-    assert_eq!(families.len(), mlxcel::models::ALL_MODEL_TYPES.len() + 2);
+    // The registry module pins the exact family count; here the JSON must
+    // carry every family it builds, including the standalone vision ones.
+    let registry = mlxcel::models::registry::build_architecture_registry(env!("CARGO_PKG_VERSION"));
+    assert_eq!(families.len(), registry.families.len());
+    assert!(families.len() > mlxcel::models::ALL_MODEL_TYPES.len());
     assert_eq!(families[0]["id"], "llama");
     assert!(
         value["runtime_kinds"]
@@ -466,8 +470,13 @@ fn arch_json_output_is_stable_registry_json() {
 fn supported_models_output_lists_sapiens2_dense_prediction() {
     let mut out = String::new();
     write_supported_models(&mut out).unwrap();
+    let dense = out
+        .split("Dense Prediction:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").next())
+        .unwrap_or_else(|| panic!("missing Dense Prediction section: {out}"));
     assert!(
-        out.contains("Dense Prediction:\n  - sapiens2"),
+        dense.lines().any(|line| line == "  - sapiens2"),
         "missing Sapiens2 dense family: {out}"
     );
 }
